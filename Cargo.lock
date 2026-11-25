@@ -1109,7 +1109,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xeet-artifact"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "xeet-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "xeet-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "xeet-gateway"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "xeet-ocr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "png",
  "serde",
@@ -1235,6 +1235,8 @@ dependencies = [
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "xeet-artifact",
+ "xeet-capture",
  "xeet-core",
  "xeet-resolve",
 ]
