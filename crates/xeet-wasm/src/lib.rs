@@ -123,9 +123,10 @@ mod ffi {
     /// Builds a screenshot artifact from the captured image's bytes and a
     /// capture request (`{ capturedAt, method, declaredName?, declaredType?,
     /// context? }`, the context in xeet-capture's `CaptureContext` shape). Pure:
-    /// the same inputs give the same artifact id. Returns `{ document, assets,
-    /// contextText }`; the image asset is the input bytes unchanged, and
-    /// `contextText` is the exact capture-context bytes the artifact hashed.
+    /// the same inputs give the same artifact id. Returns `{ documentText,
+    /// assets, contextText }`: store and send `documentText` verbatim (the id
+    /// hashes its number tokens as written); the image asset is the input bytes
+    /// unchanged; `contextText` is the exact capture-context bytes it hashed.
     #[wasm_bindgen]
     pub fn capture_screenshot(image: &[u8], request: &str) -> Result<String, JsValue> {
         super::capture_screenshot_json(image, request).map_err(|e| JsValue::from_str(&e))
@@ -618,7 +619,9 @@ pub fn capture_screenshot_json(image: &[u8], request: &str) -> Result<String, St
         })
         .collect();
     let context_text = context.map(|c| String::from_utf8(c).expect("serde_json writes UTF-8"));
-    Ok(serde_json::json!({ "document": package.document, "assets": assets, "contextText": context_text }).to_string())
+    // The document's text is returned verbatim: its id hashes number tokens as written, so a caller must store and
+    // send this string, never a re-serialization of the parsed value (a JS round trip turns 1.0 into 1).
+    Ok(serde_json::json!({ "documentText": package.document.to_string(), "assets": assets, "contextText": context_text }).to_string())
 }
 
 /// The pure core of `verify_screenshot`.

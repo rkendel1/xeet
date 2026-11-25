@@ -22,12 +22,13 @@ fn ok(report: &str) -> bool {
 fn a_capture_is_deterministic_and_verifies_against_its_bytes() {
     let a: serde_json::Value = serde_json::from_str(&capture_screenshot_json(PNG, &request()).unwrap()).unwrap();
     let b: serde_json::Value = serde_json::from_str(&capture_screenshot_json(PNG, &request()).unwrap()).unwrap();
-    assert_eq!(a["document"]["id"], b["document"]["id"], "same inputs, same artifact");
-    assert_eq!(a["document"]["subject"]["type"], "screenshot");
+    assert_eq!(a["documentText"], b["documentText"], "same inputs, same artifact");
+    let parsed: serde_json::Value = serde_json::from_str(a["documentText"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed["subject"]["type"], "screenshot");
     let roles: Vec<&str> = a["assets"].as_array().unwrap().iter().map(|x| x["role"].as_str().unwrap()).collect();
     assert!(roles.contains(&"source-image") && roles.contains(&"capture-context"), "{roles:?}");
 
-    let document = a["document"].to_string();
+    let document = a["documentText"].as_str().unwrap().to_string();
     let context = a["contextText"].as_str().unwrap();
     assert!(ok(&verify_screenshot_json(&document, PNG, Some(context))), "{}", verify_screenshot_json(&document, PNG, Some(context)));
 
