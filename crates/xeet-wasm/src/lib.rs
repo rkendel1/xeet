@@ -120,6 +120,26 @@ mod ffi {
 
     /// The upstream app version this build embeds, so a caller can record what
     /// produced a render (PLAN.md §11: every preview says how fresh it is).
+    /// Builds a screenshot artifact from the captured image's bytes and a
+    /// capture request (`{ capturedAt, method, declaredName?, declaredType?,
+    /// context? }`, the context in xeet-capture's `CaptureContext` shape). Pure:
+    /// the same inputs give the same artifact id. Returns `{ document, assets,
+    /// contextText }`; the image asset is the input bytes unchanged, and
+    /// `contextText` is the exact capture-context bytes the artifact hashed.
+    #[wasm_bindgen]
+    pub fn capture_screenshot(image: &[u8], request: &str) -> Result<String, JsValue> {
+        super::capture_screenshot_json(image, request).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Verifies a screenshot artifact against the bytes it names: the
+    /// document's identity, every asset's size and digest, its schema and
+    /// provenance. Returns the verification report as JSON (`ok`, `checks`,
+    /// `cannotEstablish`).
+    #[wasm_bindgen]
+    pub fn verify_screenshot(document: &str, image: &[u8], context_text: Option<String>) -> String {
+        super::verify_screenshot_json(document, image, context_text.as_deref())
+    }
+
     #[wasm_bindgen]
     pub fn upstream_version() -> String {
         xeet_core::fonts::UPSTREAM_APP_VERSION.to_string()
@@ -550,6 +570,83 @@ fn frame(status: u8, payload: &[u8], report: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(payload);
     buf.extend_from_slice(report);
     buf
+}
+
+// ---------------------------------------------------------------------------
+// Screenshot artifacts (xeet-capture), for hosts that capture in a browser.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureRequest {
+    captured_at: String,
+    method: String,
+    declared_name: Option<String>,
+    declared_type: Option<String>,
+    context: Option<serde_json::Value>,
+}
+
+/// The pure core of `capture_screenshot`: callable natively, so it is tested
+/// without a JS engine.
+pub fn capture_screenshot_json(image: &[u8], request: &str) -> Result<String, String> {
+    let r: CaptureRequest = serde_json::from_str(request).map_err(|e| format!("capture request: {e}"))?;
+    let context = match &r.context {
+        Some(v) => Some(serde_json::to_vec(v).map_err(|e| format!("capture context: {e}"))?),
+        None => None,
+    };
+    let package = xeet_capture::image::capture(&xeet_capture::image::Capture {
+        bytes: image,
+        captured_at: r.captured_at,
+        method: r.method,
+        declared_name: r.declared_name,
+        declared_type: r.declared_type,
+        context: context.as_deref(),
+    })?;
+    let artifact = package.artifact()?;
+    let assets: Vec<serde_json::Value> = artifact
+        .assets
+        .iter()
+        .map(|a| {
+            let role = artifact
+                .provenance
+                .inputs
+                .iter()
+                .find(|i| i.asset == a.sha256)
+                .map(|i| i.role.clone())
+                .unwrap_or_default();
+            serde_json::json!({ "path": a.path, "sha256": a.sha256, "mediaType": a.media_type, "bytes": a.bytes, "role": role })
+        })
+        .collect();
+    let context_text = context.map(|c| String::from_utf8(c).expect("serde_json writes UTF-8"));
+    Ok(serde_json::json!({ "document": package.document, "assets": assets, "contextText": context_text }).to_string())
+}
+
+/// The pure core of `verify_screenshot`.
+pub fn verify_screenshot_json(document: &str, image: &[u8], context_text: Option<&str>) -> String {
+    let fail = |m: String| serde_json::json!({ "ok": false, "checks": [{ "name": "input", "status": "fail", "detail": [m] }] }).to_string();
+    let doc: serde_json::Value = match serde_json::from_str(document) {
+        Ok(v) => v,
+        Err(e) => return fail(format!("document: {e}")),
+    };
+    let artifact: xeet_artifact::Artifact = match serde_json::from_value(doc.clone()) {
+        Ok(a) => a,
+        Err(e) => return fail(format!("document is not an artifact: {e}")),
+    };
+    let mut files = std::collections::BTreeMap::new();
+    for input in &artifact.provenance.inputs {
+        let Some(asset) = artifact.assets.iter().find(|a| a.sha256 == input.asset) else { continue };
+        let bytes = match input.role.as_str() {
+            xeet_capture::image::INPUT_ROLE => image.to_vec(),
+            xeet_capture::image::CONTEXT_ROLE => match context_text {
+                Some(t) => t.as_bytes().to_vec(),
+                None => continue,
+            },
+            _ => continue,
+        };
+        files.insert(asset.path.clone(), bytes);
+    }
+    let package = xeet_artifact::Package { document: doc, text: Some(document.to_string()), files };
+    serde_json::to_string(&xeet_artifact::verify::verify(&package, None)).unwrap_or_else(|e| fail(e.to_string()))
 }
 
 #[cfg(test)]
