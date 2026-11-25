@@ -194,8 +194,22 @@ impl Backend for TesseractBackend {
     }
 }
 
-/// Parses Tesseract's TSV into lines in the engine's reading order.
+/// The column header Tesseract's TSV renderer writes. The library call behind
+/// it (`GetTSVText`, which tesseract.js returns as `data.tsv`) omits it.
+pub const TSV_HEADER: &str =
+    "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
+
+/// Parses Tesseract's TSV into lines in the engine's reading order. Rows
+/// without the header line are read with [`TSV_HEADER`].
 pub fn parse_tsv(tsv: &str, engine: EngineInfo) -> Result<OcrResult, String> {
+    let first = tsv.lines().next().ok_or("empty TSV")?;
+    let owned;
+    let tsv = if first.starts_with("level\t") {
+        tsv
+    } else {
+        owned = format!("{TSV_HEADER}\n{tsv}");
+        &owned
+    };
     let mut rows = tsv.lines();
     let header: Vec<&str> = rows.next().ok_or("empty TSV")?.split('\t').collect();
     let col = |name: &str| {
@@ -349,26 +363,28 @@ impl Backend for HelperBackend {
         }
         let r: OcrResult = serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("{}: not {PROTOCOL}: {e}", self.path.display()))?;
-        if r.protocol != PROTOCOL {
-            return Err(format!(
-                "{}: protocol {} is not {PROTOCOL}",
-                self.path.display(),
-                r.protocol
-            ));
-        }
-        for l in &r.lines {
-            let ok = l.bx.iter().all(|v| (-0.001..=1.001).contains(v))
-                && (0.0..=1.0).contains(&l.confidence);
-            if !ok {
-                return Err(format!(
-                    "{}: line {:?} has a box or confidence outside 0..1",
-                    self.path.display(),
-                    l.text
-                ));
-            }
-        }
+        check(&r).map_err(|e| format!("{}: {e}", self.path.display()))?;
         Ok(r)
     }
+}
+
+/// Checks a result that crossed a process or host boundary: its protocol,
+/// and every line's box and confidence within 0..1.
+pub fn check(r: &OcrResult) -> Result<(), String> {
+    if r.protocol != PROTOCOL {
+        return Err(format!("protocol {} is not {PROTOCOL}", r.protocol));
+    }
+    for l in &r.lines {
+        let ok = l.bx.iter().all(|v| (-0.001..=1.001).contains(v))
+            && (0.0..=1.0).contains(&l.confidence);
+        if !ok {
+            return Err(format!(
+                "line {:?} has a box or confidence outside 0..1",
+                l.text
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -390,14 +406,10 @@ fn digest(v: &Value) -> String {
 impl<B: Backend> OcrProvider<B> {
     pub fn new(backend: B) -> Self {
         let e = backend.engine().clone();
-        // The version names the engine *and* its configuration, so a cached
-        // reading is reused only when both are unchanged.
-        let cfg =
-            digest(&json!({"engine": e, "uncertainBelow": UNCERTAIN_BELOW, "protocol": PROTOCOL}));
-        let version = format!("{}+{}", e.version, &cfg[7..19]);
+        let (id, version) = identity(&e);
         let mut m = contract::manifest();
         m.provider = contract::Provider {
-            id: format!("xeet-ocr:{}", e.name),
+            id,
             name: format!("Local OCR ({} {})", e.name, e.version),
             version,
             description: format!("Reads text, positions and confidence from images on this device with {} {} ({}); results are inference. Text only: no scene understanding.", e.name, e.version, e.platform),
@@ -457,6 +469,79 @@ impl<B: Backend> OcrProvider<B> {
             manifest: m,
         }
     }
+}
+
+/// The provider id and version that attribute an engine's readings. The
+/// version names the engine *and* its configuration, so a cached reading is
+/// reused only when both are unchanged.
+pub fn identity(e: &EngineInfo) -> (String, String) {
+    let cfg =
+        digest(&json!({"engine": e, "uncertainBelow": UNCERTAIN_BELOW, "protocol": PROTOCOL}));
+    (
+        format!("xeet-ocr:{}", e.name),
+        format!("{}+{}", e.version, &cfg[7..19]),
+    )
+}
+
+/// Holds a reading to the dimensions in the image's header, warning when the
+/// engine reported others.
+pub fn reconcile(r: &mut OcrResult, width: u32, height: u32) {
+    if (r.image.width, r.image.height) != (width, height) {
+        r.warnings.push(format!(
+            "engine reported {}x{}, the file header says {}x{}",
+            r.image.width, r.image.height, width, height
+        ));
+        r.image.width = width;
+        r.image.height = height;
+    }
+}
+
+/// Applies a reading made outside this process (a browser's WebAssembly
+/// engine) to a screenshot artifact, exactly as the `vision.read` provider
+/// and `representation.annotate` do: a new artifact derived from `package`,
+/// whose image and context assets are carried over byte for byte. Pure: `at`
+/// is the reading's time, supplied by the caller.
+pub fn derive(
+    package: &xeet_artifact::Package,
+    mut reading: OcrResult,
+    at: &str,
+) -> Result<xeet_artifact::Package, String> {
+    check(&reading)?;
+    let e = &reading.engine;
+    if [&e.name, &e.version, &e.platform]
+        .iter()
+        .any(|f| f.trim().is_empty())
+        || e.languages.is_empty()
+    {
+        return Err("the engine must name itself, its version, platform and languages".into());
+    }
+    for w in reading.lines.iter().flat_map(|l| &l.words) {
+        if !w.bx.iter().all(|v| (-0.001..=1.001).contains(v))
+            || !(0.0..=1.0).contains(&w.confidence)
+        {
+            return Err(format!(
+                "word {:?} has a box or confidence outside 0..1",
+                w.text
+            ));
+        }
+    }
+    let artifact = package.artifact()?;
+    let image = artifact
+        .provenance
+        .inputs
+        .iter()
+        .find(|i| i.role == xeet_capture::image::INPUT_ROLE)
+        .and_then(|i| package.asset_bytes(&i.asset))
+        .ok_or("the artifact has no source image")?;
+    let sniffed =
+        xeet_capture::image::sniff(image).ok_or("the source image is not a recognized image")?;
+    reconcile(&mut reading, sniffed.width, sniffed.height);
+    let (id, version) = identity(&reading.engine);
+    let source = xeet_engine::store::uri(&artifact.id);
+    let ann = to_annotation(&reading, "image", (&id, &version), at, Some(&source));
+    let ann: xeet_artifact::annotate::Annotation =
+        serde_json::from_value(ann).map_err(|e| e.to_string())?;
+    xeet_artifact::annotate::annotate(package, &ann)
 }
 
 /// The annotation for a recognition result: one inferred element per line.
@@ -627,14 +712,7 @@ impl<B: Backend> Provider for OcrProvider<B> {
                 return out;
             }
         };
-        if (r.image.width, r.image.height) != (sniffed.width, sniffed.height) {
-            r.warnings.push(format!(
-                "engine reported {}x{}, the file header says {}x{}",
-                r.image.width, r.image.height, sniffed.width, sniffed.height
-            ));
-            r.image.width = sniffed.width;
-            r.image.height = sniffed.height;
-        }
+        reconcile(&mut r, sniffed.width, sniffed.height);
         let at = session.now.clone().unwrap_or_default();
         let m = &self.manifest.provider;
         let ann = to_annotation(

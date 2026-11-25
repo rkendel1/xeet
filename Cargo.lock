@@ -1238,6 +1238,8 @@ dependencies = [
  "xeet-artifact",
  "xeet-capture",
  "xeet-core",
+ "xeet-engine",
+ "xeet-ocr",
  "xeet-resolve",
 ]
 

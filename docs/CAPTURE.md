@@ -19,6 +19,7 @@ or edits the pixels.
 | Local OCR provider (`vision.read`, `ocr:local` scope) | `crates/xeet-ocr` | **verified with real Tesseract 5.3.4** on real images |
 | `xeet-ocr/1` helper protocol | `crates/xeet-ocr` `HelperBackend` | **verified** with a scripted helper (tests the protocol, not Vision) |
 | Capture path, reuse, gateway delivery | `Gateway::derive`, `xeet capture` | **verified** (Rust + CLI tests; a headless-Chromium capture) |
+| Browser OCR (a WebAssembly engine such as tesseract.js reads; xeet applies the reading) | `xeet_ocr::derive`, `annotate_ocr` in `crates/xeet-wasm` | **verified**: the real Tesseract 5.3.4 reading of `invoices.png`, given as header-less TSV the way tesseract.js returns it, yields the native path's elements, pixel boxes, confidences and `ocr.uncertain` doubts exactly; the derived artifact verifies against the original bytes (Rust tests, and the built module under Node). tesseract.js itself was not run here. Browser OCR reads only pixels: it does not produce the accessibility tree, which is separate evidence only the macOS app supplies |
 | Apple Vision OCR helper `xeet-vision-ocr` | `apps/macos/Sources/XeetVisionOCR` | **unverified**: syntax-checked with `swiftc -parse` (Swift 6.0.3, Linux), never compiled against the macOS SDK or run |
 | Menu-bar app (ScreenCaptureKit, shortcuts, region overlay, AX tree, clipboard/export) | `apps/macos/Sources/XeetCapture` | **unverified**: same |
 | App bundling | `apps/macos/scripts/make-app.sh` | **unverified**: `bash -n` only |
@@ -59,6 +60,17 @@ establish it.
   correction, automatic language detection). It converts Vision's bottom-left
   boxes to top-left, orders lines geometrically, and declares that Vision
   gives one confidence per line, not per word.
+- **In a browser**, the engine runs as WebAssembly in the page and xeet only
+  applies its reading. `annotate_ocr(document, image, contextText, request)`
+  (the `xeet-wasm` export) takes the original screenshot artifact's verbatim
+  text and bytes (refused unless they verify), and `request` is `{ at, engine,
+  tsv }` — `tsv` is tesseract.js's `data.tsv` (request it with `{ tsv: true }`;
+  Tesseract's TSV with or without the header line), `engine` an `EngineInfo`
+  (`platform: "wasm"`, the core version, the settings used: set
+  `tessedit_pageseg_mode` to 3 to read like the native path) — or `{ at,
+  reading }` with an `xeet-ocr/1` result. It runs the same code as the native
+  provider (`parse_tsv`, `to_annotation`, `annotate`) and returns the derived
+  artifact's `documentText`. It is pure: the caller supplies `at`.
 - The hand-authored stand-in used by gateway tests is now
   `test-harness:hand-authored-reader`, and lives only under `tests/`.
 

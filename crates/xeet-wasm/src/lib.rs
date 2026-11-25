@@ -152,6 +152,20 @@ mod ffi {
         super::understand_artifact_json(document, request).map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Adds what a browser's OCR engine (tesseract.js) read from the pixels to
+    /// a screenshot artifact, as the native `vision.read` path does: a new
+    /// artifact `derivedFrom` the original, every line `inferred` and
+    /// attributed to the engine. `document`, `image` and `context_text` are
+    /// the original's verbatim text and bytes (checked before use). `request`
+    /// is `{ at, engine, tsv }` (Tesseract TSV, with or without its header
+    /// line) or `{ at, reading }` (an `xeet-ocr/1` result). Pure. Returns `{
+    /// documentText, id, derivedFrom, lines, uncertainLines }`; store and send
+    /// `documentText` verbatim.
+    #[wasm_bindgen]
+    pub fn annotate_ocr(document: &str, image: &[u8], context_text: Option<String>, request: &str) -> Result<String, JsValue> {
+        super::annotate_ocr_json(document, image, context_text.as_deref(), request).map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen]
     pub fn upstream_version() -> String {
         xeet_core::fonts::UPSTREAM_APP_VERSION.to_string()
@@ -635,17 +649,11 @@ pub fn capture_screenshot_json(image: &[u8], request: &str) -> Result<String, St
     Ok(serde_json::json!({ "documentText": package.document.to_string(), "assets": assets, "contextText": context_text }).to_string())
 }
 
-/// The pure core of `verify_screenshot`.
-pub fn verify_screenshot_json(document: &str, image: &[u8], context_text: Option<&str>) -> String {
-    let fail = |m: String| serde_json::json!({ "ok": false, "checks": [{ "name": "input", "status": "fail", "detail": [m] }] }).to_string();
-    let doc: serde_json::Value = match serde_json::from_str(document) {
-        Ok(v) => v,
-        Err(e) => return fail(format!("document: {e}")),
-    };
-    let artifact: xeet_artifact::Artifact = match serde_json::from_value(doc.clone()) {
-        Ok(a) => a,
-        Err(e) => return fail(format!("document is not an artifact: {e}")),
-    };
+/// A screenshot artifact's package from its verbatim document text and the bytes its inputs name.
+fn screenshot_package(document: &str, image: &[u8], context_text: Option<&str>) -> Result<xeet_artifact::Package, String> {
+    let doc: serde_json::Value = serde_json::from_str(document).map_err(|e| format!("document: {e}"))?;
+    let artifact: xeet_artifact::Artifact =
+        serde_json::from_value(doc.clone()).map_err(|e| format!("document is not an artifact: {e}"))?;
     let mut files = std::collections::BTreeMap::new();
     for input in &artifact.provenance.inputs {
         let Some(asset) = artifact.assets.iter().find(|a| a.sha256 == input.asset) else { continue };
@@ -659,8 +667,56 @@ pub fn verify_screenshot_json(document: &str, image: &[u8], context_text: Option
         };
         files.insert(asset.path.clone(), bytes);
     }
-    let package = xeet_artifact::Package { document: doc, text: Some(document.to_string()), files };
-    serde_json::to_string(&xeet_artifact::verify::verify(&package, None)).unwrap_or_else(|e| fail(e.to_string()))
+    Ok(xeet_artifact::Package { document: doc, text: Some(document.to_string()), files })
+}
+
+/// The pure core of `verify_screenshot`.
+pub fn verify_screenshot_json(document: &str, image: &[u8], context_text: Option<&str>) -> String {
+    let fail = |m: String| serde_json::json!({ "ok": false, "checks": [{ "name": "input", "status": "fail", "detail": [m] }] }).to_string();
+    match screenshot_package(document, image, context_text) {
+        Ok(package) => serde_json::to_string(&xeet_artifact::verify::verify(&package, None)).unwrap_or_else(|e| fail(e.to_string())),
+        Err(e) => fail(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OcrRequest {
+    at: String,
+    engine: Option<xeet_ocr::EngineInfo>,
+    tsv: Option<String>,
+    reading: Option<xeet_ocr::OcrResult>,
+}
+
+/// The pure core of `annotate_ocr`.
+pub fn annotate_ocr_json(document: &str, image: &[u8], context_text: Option<&str>, request: &str) -> Result<String, String> {
+    let r: OcrRequest = serde_json::from_str(request).map_err(|e| format!("ocr request: {e}"))?;
+    let reading = match (r.engine, r.tsv, r.reading) {
+        (Some(engine), Some(tsv), None) => xeet_ocr::parse_tsv(&tsv, engine).map_err(|e| format!("tsv: {e}"))?,
+        (None, None, Some(reading)) => reading,
+        _ => return Err("ocr request: give either engine and tsv, or reading".into()),
+    };
+    let original = screenshot_package(document, image, context_text)?;
+    let report = xeet_artifact::verify::verify(&original, None);
+    if !report.ok {
+        return Err(format!(
+            "the original does not verify against these bytes: {}",
+            serde_json::to_string(&report).map_err(|e| e.to_string())?
+        ));
+    }
+    let derived = xeet_ocr::derive(&original, reading, &r.at)?;
+    let ocr = derived.document["semantic"]["elements"]
+        .as_array()
+        .and_then(|els| els.iter().find(|e| e["id"] == "ocr"))
+        .ok_or("the derived artifact has no ocr element")?;
+    Ok(serde_json::json!({
+        "documentText": derived.document.to_string(),
+        "id": derived.document["id"],
+        "derivedFrom": derived.document["provenance"]["derivedFrom"],
+        "lines": ocr["attrs"]["ocr.lines"],
+        "uncertainLines": ocr["attrs"]["ocr.uncertainLines"],
+    })
+    .to_string())
 }
 
 /// The pure core of `understand_artifact`.
