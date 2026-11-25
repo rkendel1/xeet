@@ -1,6 +1,6 @@
 //! The browser-facing screenshot exports, run natively (the same pure functions the WASM build exports).
 
-use xeet_wasm::{capture_screenshot_json, verify_screenshot_json};
+use xeet_wasm::{capture_screenshot_json, understand_artifact_json, verify_screenshot_json};
 
 const PNG: &[u8] = include_bytes!("../../../tests/fixtures/gateway/invoices.png");
 const CONTEXT: &str = include_str!("../../../tests/fixtures/capture/context-region-retina.json");
@@ -43,4 +43,19 @@ fn a_capture_is_deterministic_and_verifies_against_its_bytes() {
 fn a_request_is_strict_and_an_image_is_identified_by_content() {
     assert!(capture_screenshot_json(PNG, r#"{"capturedAt":"x","method":"m","surprise":1}"#).is_err());
     assert!(capture_screenshot_json(b"not an image", &request()).is_err());
+}
+
+#[test]
+fn a_model_that_cannot_see_reads_the_artifact_as_text_with_its_basis() {
+    let a: serde_json::Value = serde_json::from_str(&capture_screenshot_json(PNG, &request()).unwrap()).unwrap();
+    let document = a["documentText"].as_str().unwrap();
+    let out: serde_json::Value = serde_json::from_str(&understand_artifact_json(document, r#"{"consumer":"text","maxChars":6000}"#).unwrap()).unwrap();
+    let text = out["projection"].as_str().unwrap();
+    assert!(text.contains("screenshot"), "{text}");
+    assert!(text.contains("region"), "the capture context reaches the text model: {text}");
+    assert!(text.len() <= 6000 + 200, "the budget holds");
+    assert!(out["delivery"].is_object());
+    let json: serde_json::Value = serde_json::from_str(&understand_artifact_json(document, r#"{"consumer":"text","format":"json"}"#).unwrap()).unwrap();
+    assert!(json["projection"].is_object());
+    assert!(understand_artifact_json("{}", r#"{"consumer":"text"}"#).is_err());
 }

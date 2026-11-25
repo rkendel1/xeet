@@ -141,6 +141,17 @@ mod ffi {
         super::verify_screenshot_json(document, image, context_text.as_deref())
     }
 
+    /// The artifact as a model that cannot see reads it: xeet's projection
+    /// (`representation.understand`), the same one its gateway hands a
+    /// text-only model. Each statement keeps its basis (from the source,
+    /// observed, derived, inferred, unknown). `request` is `{ consumer:
+    /// "text" | "vision", maxChars?, maxText?, sections?, focus?, depth?,
+    /// format?: "text" | "json" }`. Returns `{ projection, delivery }`.
+    #[wasm_bindgen]
+    pub fn understand_artifact(document: &str, request: &str) -> Result<String, JsValue> {
+        super::understand_artifact_json(document, request).map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen]
     pub fn upstream_version() -> String {
         xeet_core::fonts::UPSTREAM_APP_VERSION.to_string()
@@ -650,6 +661,26 @@ pub fn verify_screenshot_json(document: &str, image: &[u8], context_text: Option
     }
     let package = xeet_artifact::Package { document: doc, text: Some(document.to_string()), files };
     serde_json::to_string(&xeet_artifact::verify::verify(&package, None)).unwrap_or_else(|e| fail(e.to_string()))
+}
+
+/// The pure core of `understand_artifact`.
+pub fn understand_artifact_json(document: &str, request: &str) -> Result<String, String> {
+    let artifact: xeet_artifact::Artifact = serde_json::from_str(document).map_err(|e| format!("document is not an artifact: {e}"))?;
+    let mut fields: serde_json::Value = serde_json::from_str(request).map_err(|e| format!("request: {e}"))?;
+    let form = match fields.get("format").and_then(|v| v.as_str()) {
+        Some("json") => xeet_artifact::project::Form::Json,
+        _ => xeet_artifact::project::Form::Text,
+    };
+    if let serde_json::Value::Object(m) = &mut fields {
+        m.remove("format");
+    }
+    let req: xeet_artifact::project::Request = serde_json::from_value(fields).map_err(|e| format!("request: {e}"))?;
+    let (body, delivery) = xeet_artifact::project::render_with_report(&artifact, &req, form)?;
+    let projection = match form {
+        xeet_artifact::project::Form::Json => serde_json::from_str(&body).map_err(|e| e.to_string())?,
+        xeet_artifact::project::Form::Text => serde_json::Value::String(body),
+    };
+    Ok(serde_json::json!({ "projection": projection, "delivery": delivery }).to_string())
 }
 
 #[cfg(test)]
